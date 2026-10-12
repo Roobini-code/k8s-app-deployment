@@ -1,0 +1,26 @@
+name: React CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig*.json"
+      - "vite.config.ts"
+      - "vitest.config.ts"
+      - "Dockerfile"
+      - "nginx.conf"
+      - ".github/workflows/ci.yml"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: OWNER/ci-cd-pipelines/.github/workflows/k8s-app-deployment-ci.yml@main
+    permissions:
+      contents: read

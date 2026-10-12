@@ -1,0 +1,33 @@
+name: React CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig*.json"
+      - "vite.config.ts"
+      - "vitest.config.ts"
+      - "Dockerfile"
+      - "nginx.conf"
+      - "scripts/**"
+      - ".github/workflows/cd.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-app-deployment-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: OWNER/ci-cd-pipelines/.github/workflows/k8s-app-deployment-cd.yml@main
+    permissions:
+      contents: write
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

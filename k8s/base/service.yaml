@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: deploylab
+  namespace: k8s-demo
+  labels:
+    app.kubernetes.io/name: deploylab
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: deploylab
+    app.kubernetes.io/slot: blue
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 30080
+      protocol: TCP
