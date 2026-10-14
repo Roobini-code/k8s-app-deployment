@@ -86,8 +86,9 @@ Replace `OWNER` with your GitHub account or organization in:
 - `.github/workflows/ci.yml`
 - `.github/workflows/cd.yml`
 - `argocd/application.yaml`
-- `k8s/base/deployment-blue.yaml`
-- `k8s/base/deployment-green.yaml`
+
+The Docker Hub username in the initial blue/green Deployment image placeholders
+is replaced by the first successful CD promotion; it is not the GitHub `OWNER`.
 
 Commit and push this project to the app repository's `main` branch. Commit and
 push `ci-cd-pipelines` to its `main` branch as well. The workflow reference
