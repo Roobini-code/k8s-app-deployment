@@ -11,7 +11,8 @@ Argo CD applies that Git change to the cluster.
 > is not a promise that a chosen instance is Free Tier eligible or free.
 > A `t3.medium` (2 vCPU, 4 GiB RAM) is a more realistic single-node learning
 > host for K3s + Argo CD + this app, and may be billable. Check current regional
-> prices and Free Tier eligibility before launching. Create a budget alert,
+> prices, domain registration, public IPv4 charges, and Free Tier eligibility
+> before launching. Create a budget alert,
 > stop the instance when idle, and terminate it plus its storage when finished.
 
 ## 1. How the pieces fit
@@ -23,11 +24,12 @@ flowchart LR
     CI -->|checks pass| Merge[Reviewed merge to main]
     Merge -->|push trigger| CD[Reusable main-branch CD]
     CD -->|test + build + push| DH[Docker Hub<br/>image: commit SHA]
-    CD -->|commit updated image tag| Git[Git desired state<br/>Deployment manifest]
+    CD -->|commit image and slot switch| Git[Git desired state<br/>Kubernetes manifests]
     Git -->|poll Git revision| Argo[Argo CD]
     Argo -->|sync Deployment| K3s[K3s cluster<br/>single EC2 node]
     K3s -->|pull exact image tag| DH
-    Browser -->|HTTP :30080<br/>source IP restricted| Service[NodePort Service]
+    Browser -->|HTTPS app.example.com| Traefik[Traefik Ingress<br/>ports 80/443]
+    Traefik -->|internal cluster traffic| Service[ClusterIP Service]
     Service --> Pod[React static site<br/>Nginx non-root Pod]
     K3s --> Pod
 ```
@@ -216,15 +218,15 @@ Create an EC2 security group with:
 
 | Direction | Protocol/port | Source | Purpose |
 |---|---:|---|---|
-| Inbound | TCP 30080 | **My IP** (`your.public.ip/32`) | Example app's K3s NodePort |
-| Inbound | TCP 30443 | **My IP** (`your.public.ip/32`), optional | Temporary Argo CD UI access |
+| Inbound | TCP 80 | `0.0.0.0/0` | Public HTTP; Traefik redirects app requests to HTTPS and Let's Encrypt uses HTTP-01 validation |
+| Inbound | TCP 443 | `0.0.0.0/0` | Public HTTPS application traffic |
 | Inbound | TCP 22 | None by default | Use Session Manager; only add SSH from My IP if explicitly needed |
 | Outbound | Default allow all | `0.0.0.0/0` | K3s install, GitHub/Docker Hub, and Session Manager; narrow later if desired |
 
-Do not expose the Kubernetes API (TCP 6443), SSH, or Argo CD broadly to the
-internet. The app uses HTTP for this hands-on exercise; it is not suitable for
-sensitive traffic. For public production traffic, configure a DNS name, TLS,
-authentication as appropriate, and an ingress/load-balancing design.
+These public web ports are intentional: they serve the website to visitors
+from any IP, so your changing home IP does not need to be maintained. Do not
+add inbound rules for NodePort `30080`, Argo CD `30443`, Kubernetes API `6443`,
+or SSH. Do not add `::/0` IPv6 rules unless IPv6 is configured end to end.
 
 Launch the instance from **EC2 → Launch instance** with Amazon Linux 2023,
 the selected 2-vCPU/4-GiB type, a 20-GiB gp3 root volume, the security group
@@ -271,10 +273,11 @@ For repeatable/production installs, select and pin a reviewed Argo CD release
 instead of using the moving `stable` branch. Wait until all Argo CD components
 are `Running` before proceeding.
 
-### 4.5 Reach the Argo CD UI
+### 4.5 Reach the Argo CD UI through Session Manager
 
-Expose the Argo CD server as a NodePort for the hands-on UI. Open TCP 30443 in
-the EC2 security group only from your current public IP:
+Keep Argo CD private; do not add a public security-group rule for its UI. The
+following temporary NodePort is reachable on the EC2 host itself and is
+tunneled through Session Manager:
 
 ```bash
 sudo k3s kubectl -n argocd patch service argocd-server \
@@ -282,12 +285,28 @@ sudo k3s kubectl -n argocd patch service argocd-server \
   -p '{"spec":{"type":"NodePort","ports":[{"name":"https","port":443,"targetPort":8080,"protocol":"TCP","nodePort":30443}]}}'
 ```
 
-Get the EC2 public IPv4 address from the AWS console and open
-`https://EC2-PUBLIC-IP:30443`. Argo CD's initial TLS certificate is
-self-signed, so the browser will warn; only proceed for your own instance.
-Remove the inbound rule and change the service back to ClusterIP when you no
-longer need external UI access. A safer temporary access method is to use
-Session Manager port forwarding and keep the Argo CD service internal.
+On your own computer, install the AWS CLI and Session Manager plugin, configure
+an AWS profile with permission to start/terminate a session to this instance,
+and run:
+
+```powershell
+aws ssm start-session `
+  --target i-REPLACE-WITH-INSTANCE-ID `
+  --document-name AWS-StartPortForwardingSession `
+  --parameters '{"portNumber":["30443"],"localPortNumber":["30443"]}'
+```
+
+Keep that terminal open and browse to `https://localhost:30443`. Argo CD's
+initial TLS certificate is self-signed, so expect a browser warning for this
+local tunnel. Do not enter credentials on a public IP or share the initial
+admin password. When finished, stop the port-forward session with `Ctrl+C` and
+remove the temporary NodePort so the Service is private again:
+
+```bash
+sudo k3s kubectl -n argocd patch service argocd-server \
+  --type merge \
+  -p '{"spec":{"type":"ClusterIP","ports":[{"name":"https","port":443,"targetPort":8080,"protocol":"TCP"}]}}'
+```
 
 Get the initial admin password on the EC2 host:
 
@@ -301,7 +320,101 @@ Sign in as `admin`, then immediately change the initial password in the Argo CD
 UI under **User Info → Update Password**. Treat the initial password as a
 secret: do not commit it, put it in logs, or share it.
 
+### 4.6 Allocate a stable public IPv4 address
+
+An EC2 auto-assigned public IPv4 address can change after a stop/start. An
+Elastic IP (EIP) gives DNS a stable IPv4 destination:
+
+1. In the AWS console, open **EC2 → Network & Security → Elastic IP addresses**.
+2. Choose **Allocate Elastic IP address**, keep the Amazon IPv4 pool selected,
+   and choose **Allocate**.
+3. Select the new address, choose **Actions → Associate Elastic IP address**,
+   select this EC2 instance, and associate it.
+4. Return to **EC2 → Instances**, select the instance, and confirm its public
+   IPv4 address matches the Elastic IP.
+5. Keep the Elastic IP associated while using the app. It can incur a charge;
+   check current AWS public IPv4 pricing. When permanently deleting the
+   instance, disassociate and release the EIP if it is no longer needed.
+
+An EIP stabilizes the **server address**, not your home IP. The security group
+allows only the website ports (80/443) from internet clients; administrative
+access remains through Session Manager.
+
+### 4.7 Point a DNS name to the Elastic IP
+
+You need a registered domain name and access to its DNS hosting (for example,
+Route 53 or your domain registrar). If using Route 53:
+
+1. Choose the exact hostname, for example `app.example.com`. Replace
+   `example.com` with a domain you own.
+2. In Route 53, open **Hosted zones** and select the public hosted zone for
+   `example.com`. Choose **Create record**.
+3. Set **Record name** to `app`, **Record type** to `A`, **Value** to the
+   Elastic IP, and **TTL** to `300` seconds. Keep simple routing, then choose
+   **Create records**.
+4. If your domain's nameservers are not already delegated to this Route 53
+   hosted zone, copy the four NS values shown in the hosted zone to the
+   domain's registrar nameserver settings. Alternatively, create the same A
+   record with the DNS provider that is already authoritative for your domain.
+5. Save the record and wait for DNS propagation. From your computer, run
+   `nslookup app.example.com` (Windows) or `dig +short app.example.com`
+   (Linux/macOS); it should return the Elastic IP.
+6. Do not create an AAAA record unless IPv6 routing and the EC2 security group
+   are also configured correctly. A stale/wrong AAAA record can cause some
+   clients to fail even when the A record is correct.
+
+Let's Encrypt must be able to resolve this public hostname to the instance and
+reach port 80 for its HTTP-01 challenge. The hostname must not be behind a
+proxy/CDN that prevents the challenge from reaching Traefik.
+
+### 4.8 Install cert-manager for automatic HTTPS certificates
+
+K3s installs Traefik by default. Traefik will receive public HTTP/HTTPS on
+ports 80/443 and route to the app's internal `ClusterIP` Service.
+cert-manager requests and renews the TLS certificate from Let's Encrypt.
+Install its CRDs/controller once per cluster before Argo CD applies the app
+manifests:
+
+1. Open the official cert-manager installation documentation and select a
+   supported release compatible with your Kubernetes version. Pin the
+   version rather than using a moving `latest` URL.
+2. In the command below, replace `CERT_MANAGER_VERSION` with that release
+   number (without the leading `v`):
+
+```bash
+sudo k3s kubectl apply -f \
+  https://github.com/cert-manager/cert-manager/releases/download/vCERT_MANAGER_VERSION/cert-manager.yaml
+sudo k3s kubectl -n cert-manager rollout status deployment/cert-manager --timeout=5m
+sudo k3s kubectl -n cert-manager rollout status deployment/cert-manager-webhook --timeout=5m
+sudo k3s kubectl -n cert-manager rollout status deployment/cert-manager-cainjector --timeout=5m
+sudo k3s kubectl wait --for=condition=Established \
+  crd/clusterissuers.cert-manager.io --timeout=2m
+```
+
+3. Edit `k8s/base/ingress.yaml` and replace both instances of
+   `app.example.com` with your DNS hostname.
+4. Edit `k8s/base/cluster-issuer.yaml` and replace
+   `REPLACE-WITH-YOUR-EMAIL` with a valid email address for Let's Encrypt
+   expiry/important certificate notices. This value is not a password.
+5. Commit and push these manifest edits to the app repo's `main`. They do not
+   require rebuilding the React image. Argo CD will pick them up after the
+   Application is installed below.
+6. Merge a qualifying app source/build change to `main` to trigger the first
+   CD release. A manifest-only change does not match the CD workflow's path
+   filters and will not trigger an image build.
+
+The `ClusterIssuer` uses Let's Encrypt production. First verify DNS and ports
+80/443 carefully; repeated failed production challenges can hit rate limits.
+For initial experimentation, temporarily configure the Let's Encrypt staging
+ACME server URL in `cluster-issuer.yaml`, verify the issuance flow, then switch
+back to the production URL and let cert-manager obtain a browser-trusted
+certificate. Staging certificates are intentionally not trusted by browsers.
+
 ## 5. CI on pull requests, CD after merge
+
+For a separate, step-by-step setup of the reusable workflow callers, Docker Hub
+secrets, branch protection, and direct manifest push permissions, see the
+[CI/CD Pipeline Setup guide](https://github.com/OWNER/ci-cd-pipelines/blob/main/doc/k8s-app-deployment/CI-CD-PIPELINE-SETUP.md).
 
 The application repository contains two small caller workflows:
 
@@ -325,7 +438,7 @@ only the inactive Deployment's image, and flips the selector in Git.
 The current reusable CD workflow **commits directly to the app repo's
 `main` branch**. The `git config`, `git add`, `git commit`, and `git push`
 commands in
-[`k8s-app-deployment-cd.yml`](../../ci-cd-pipelines/.github/workflows/k8s-app-deployment-cd.yml)
+[`k8s-app-deployment-cd.yml`](https://github.com/OWNER/ci-cd-pipelines/blob/main/.github/workflows/k8s-app-deployment-cd.yml)
 perform that commit. The caller grants the workflow `contents: write`; the
 push uses the caller repository's short-lived `GITHUB_TOKEN`, not Docker Hub
 credentials. A protected `main` branch can reject this bot push. For this
@@ -358,9 +471,10 @@ open a manifest promotion pull request for review rather than push directly.
 The Argo CD `Application` is stored in `argocd/application.yaml`; it points at
 the app repository's `main` branch and the `k8s/base` Kustomize directory.
 
-Replace `OWNER` in the file, then wait for the first CD run to publish an image
-and commit its tag to both Deployment manifests. Apply the Application from the
-EC2 Session Manager shell.
+Replace `OWNER` in the file, complete the hostname/email changes above, and
+wait for the first CD run to publish an image and commit its tag to both
+Deployment manifests. Confirm cert-manager is healthy and DNS resolves to the
+Elastic IP. Then apply the Application from the EC2 Session Manager shell.
 Since the sample GitHub repository is public, fetch its committed manifest:
 
 ```bash
@@ -379,15 +493,26 @@ regularly.
 
 Argo CD automatically syncs changes with pruning and self-healing enabled. It
 polls the configured Git branch for desired-state changes; the CD workflow's
-manifest commit is what tells Argo CD which image tag to deploy. Check the
-application status and access the app at:
+manifest commit is what tells Argo CD which image tag to deploy. The app
+Service is private (`ClusterIP`); public requests enter through Traefik's
+Ingress, with cert-manager providing the TLS Secret. Open the configured host:
 
 ```text
-http://EC2-PUBLIC-IP:30080
+https://app.example.com
 ```
 
-The NodePort is intentionally fixed to `30080`; make sure that is the inbound
-rule restricted to your IP address.
+Replace `app.example.com` with the hostname configured in DNS and in the
+Ingress. Verify the TLS certificate and route:
+
+```bash
+sudo k3s kubectl -n k8s-demo get ingress,certificate
+sudo k3s kubectl -n k8s-demo describe certificate deploylab-tls
+sudo k3s kubectl -n k8s-demo get service deploylab
+sudo k3s kubectl -n cert-manager get certificaterequests,orders,challenges
+```
+
+The EC2 security group should expose only TCP 80/443 for public app traffic;
+do not expose the app Service NodePort or Argo CD UI.
 
 ## 7. What happens for each change
 
@@ -420,9 +545,12 @@ Run on the EC2 host:
 sudo k3s kubectl get nodes
 sudo k3s kubectl -n argocd get applications
 sudo k3s kubectl -n k8s-demo get deploy,pods,services -o wide
-sudo k3s kubectl -n k8s-demo describe deployment deploylab
-sudo k3s kubectl -n k8s-demo logs deployment/deploylab
+sudo k3s kubectl -n k8s-demo get ingress,certificate
+sudo k3s kubectl -n k8s-demo describe deployment deploylab-blue
+sudo k3s kubectl -n k8s-demo describe deployment deploylab-green
+sudo k3s kubectl -n k8s-demo get pods --show-labels
 sudo k3s kubectl -n k8s-demo get events --sort-by=.lastTimestamp
+sudo k3s kubectl -n cert-manager get certificaterequests,orders,challenges
 ```
 
 Common causes:
@@ -434,7 +562,10 @@ Common causes:
 | Service has no endpoints | Service slot selector matches neither Deployment's slot label; check `kubectl -n k8s-demo get pods --show-labels` |
 | Traffic switches too early | Confirm both Deployments have sync wave `0`, Service has wave `1`, and inspect Argo CD sync/health status |
 | Pod pending/restarting | Node memory/disk pressure, Pod events, security context, and health probe path |
-| Page cannot be reached | EC2 security group source CIDR, instance public IP, NodePort `30080`, Service endpoints, and Pod readiness |
+| Domain does not resolve | DNS A record matches the Elastic IP; remove incorrect AAAA records; allow time for DNS propagation |
+| HTTP works but HTTPS certificate is missing | DNS points to this host; inbound TCP 80/443 is open; cert-manager pods are healthy; inspect Certificate, Order, and Challenge status |
+| Ingress returns 404 | Hostname in the URL exactly matches both Ingress host entries; Traefik is running; inspect the Ingress and Traefik logs |
+| Website cannot be reached | Elastic IP is associated, DNS is correct, security group allows 80/443, Traefik is healthy, and app Pods/Service endpoints are ready |
 | Actions cannot call the reusable workflow | Public workflow repository, exact owner/path/ref, organization Actions policy, and workflow YAML |
 | Promotion cannot push | Caller job grants `contents: write`; branch protection may require an approved ruleset exception or PR-based promotion |
 
@@ -449,8 +580,11 @@ This is a learning example, not a production reference architecture:
 
 - One EC2 node is a single point of failure; use a managed multi-node cluster
   or a supported HA design for production.
-- NodePort exposes the demo over plain HTTP. Restrict the source IP, do not use
-  real secrets, and configure HTTPS/authentication for anything public.
+- The public web endpoint relies on one EC2 host and its Elastic IP; use a
+  load balancer and multi-node/managed Kubernetes design for production
+  availability.
+- HTTP is redirected to HTTPS and certificates are automated, but the sample
+  does not include application authentication or a WAF.
 - The Docker Hub image and Git repository are public in this hands-on flow.
   Private repositories/images require credentials and a rotation lifecycle.
 - Change caller workflow refs from `@main` to approved tags or immutable SHAs;
@@ -479,7 +613,7 @@ When finished:
    charges permanently.
 3. Delete any separately retained EBS volumes and release an Elastic IP if one
    was allocated.
-4. Delete the temporary security-group ingress rules for ports 30080 and 30443.
+4. Delete the security-group ingress rules for ports 80 and 443.
 5. Delete the IAM instance profile/role and security group if they were created
    only for this exercise.
 6. Optionally delete the Docker Hub repository and GitHub repositories when no
@@ -493,8 +627,15 @@ each resource rather than assuming that stopping it is complete cleanup.
 ## Reference links
 
 - [K3s installation documentation](https://docs.k3s.io/quick-start)
+- [K3s networking and Traefik](https://docs.k3s.io/networking)
 - [Argo CD getting started](https://argo-cd.readthedocs.io/en/stable/getting_started/)
+- [cert-manager installation](https://cert-manager.io/docs/installation/)
+- [cert-manager HTTP-01 challenges](https://cert-manager.io/docs/configuration/acme/http01/)
+- [AWS Elastic IP addresses](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html)
+- [Route 53 DNS records](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/rrsets-working-with.html)
 - [GitHub reusable workflows](https://docs.github.com/actions/using-workflows/reusing-workflows)
 - [Docker Hub repositories](https://docs.docker.com/docker-hub/repos/)
 - [AWS Systems Manager Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html)
+- [Install the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+- [Install the Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-plugin.html)
 - [AWS Free Tier](https://aws.amazon.com/free/)

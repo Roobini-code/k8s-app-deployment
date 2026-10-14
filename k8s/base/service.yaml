@@ -8,7 +8,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "1"
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: deploylab
     app.kubernetes.io/slot: blue
@@ -16,5 +16,4 @@ spec:
     - name: http
       port: 8080
       targetPort: http
-      nodePort: 30080
       protocol: TCP
