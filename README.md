@@ -13,16 +13,20 @@ and deployed to a single-node K3s cluster on Amazon EC2 by Argo CD.
 
 ## Quick start
 
-1. Follow [`doc/COMPLETE-HANDS-ON-GUIDE.md`](doc/COMPLETE-HANDS-ON-GUIDE.md) to
-   create the Docker Hub repository, EC2 host, K3s cluster, and Argo CD
-   application.
+1. Follow [`doc/COMPLETE-HANDS-ON-GUIDE.md`](doc/COMPLETE-HANDS-ON-GUIDE.md)
+   in order; it walks through the repositories, Docker Hub, EC2/K3s/Argo CD,
+   stable Elastic IP, DNS, cert-manager, and first deployment.
 2. In `.github/workflows/ci.yml` and `.github/workflows/cd.yml`, replace
    `OWNER` with the GitHub account or organization name. Also replace `OWNER`
    in `argocd/application.yaml`.
-3. Add the Docker Hub `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` Actions
-   secrets, then push both repositories. A pull request runs CI; after merge,
-   CD publishes an immutable image and commits its tag to the Kubernetes
-   manifest. Argo CD reads that Git change and deploys it to K3s.
+3. Replace `app.example.com` in `k8s/base/ingress.yaml` with your domain and
+   `REPLACE-WITH-YOUR-EMAIL` in `k8s/base/cluster-issuer.yaml`. Follow the guide
+   in order: publish the initial image, then apply the Argo CD Application.
+4. Add the Docker Hub `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` Actions
+   secrets, then push both repositories. Merge a qualifying app change to
+   trigger the first CD image publish. The guide then has you install
+   cert-manager, verify DNS, and apply the Argo CD Application. Subsequent
+   merges publish immutable images and update Git for Argo CD to deploy.
 
 The Docker Hub image repository should be public for unauthenticated pulls by
 K3s. No AWS credentials or cluster admin credentials are given to GitHub
@@ -59,8 +63,9 @@ Open <http://localhost:8080>. Remove the local image when finished with
 
 - `src/` — React + TypeScript frontend.
 - `Dockerfile`, `nginx.conf` — unprivileged, multi-stage production image.
-- `k8s/base/` — blue/green Deployments and the NodePort Service managed by
-  Argo CD.
+- `k8s/base/` — blue/green Deployments, private ClusterIP Service, Traefik
+  Ingress, HTTPS redirect middleware, and cert-manager ClusterIssuer managed
+  by Argo CD.
 - `scripts/promote_image.py` — selects the standby color and updates the
   manifest image; unit tests cover initial setup and alternating promotions.
 - `argocd/application.yaml` — Argo CD Application pointing at `k8s/base/`.
